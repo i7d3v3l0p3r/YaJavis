@@ -31,6 +31,7 @@ const VERSION: &str = match option_env!("JARVIS_VERSION") {
     None => "dev",
 };
 const STAGE: &str = "/tmp/jarvis-setup-stage";
+const AUTOSTART_MANUAL: &str = "jarvis-autostart-manual";
 const MAX_PAYLOAD: usize = 40 << 20;
 const INSTALL_RESERVE_KIB: u64 = 1024;
 const MODELS: [&str; 3] = ["wake.bin", "oww.bin", "wake_oww.bin"];
@@ -60,6 +61,7 @@ struct Job {
     lines: Vec<String>,
     done: bool,
     error: String,
+    warning: String,
     url: String,
     #[serde(skip)]
     busy: bool,
@@ -106,7 +108,7 @@ impl Footprint {
             result.temp_kib += kib;
             let kept = MODELS.iter().position(|model| *model == name).is_some_and(|i| present_models[i]);
             let unused_tap = matches!(name, "vqe_tap-armhf.so" | "vqe_tap-arm64.so") && name != tap;
-            if name != "S98jarvisd" && !unused_tap && !kept {
+            if !unused_tap && !kept {
                 result.flash_kib += kib;
             }
         }
@@ -823,11 +825,17 @@ async fn stage_install(
     )
     .await?;
     app.log("Добавляю автозапуск и проверяю, что панель поднимается…");
-    app.shell(
-        ip,
-        &install_script(stage, &sp.userland, &sums["jarvisd"], &image.version)?,
-    )
-    .await?;
+    let output = app
+        .shell(
+            ip,
+            &install_script(stage, &sp.userland, &sums["jarvisd"], &image.version)?,
+        )
+        .await?;
+    let manual_autostart = output.lines().any(|line| line.trim() == AUTOSTART_MANUAL);
+    if manual_autostart {
+        app.log("Скрипт для ручной настройки автозапуска сохранён в /data/opt/jarvisd/S98jarvisd");
+    }
+    app.log("Проверяю запуск панели…");
     let url = format!("http://{ip}:8080/");
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -840,10 +848,24 @@ async fn stage_install(
             && status["version"] == image.version
             && status["ready"] == true
             && app
-                .shell(ip, "test ! -e /data/opt/jarvisd/update-rust.json")
+                .shell(
+                    ip,
+                    concat!(
+                        "test ! -e /data/opt/jarvisd/update-rust.json",
+                        " && test ! -e /data/opt/jarvisd/update-rust.error",
+                    ),
+                )
                 .await
                 .is_ok()
         {
+            if manual_autostart {
+                app.job.lock().unwrap().warning = concat!(
+                    "Автозапуск не удалось записать в прошивку. ",
+                    "Настройте запуск /data/opt/jarvisd/S98jarvisd start до S99quasar ",
+                    "и перезагрузите колонку.",
+                )
+                .into();
+            }
             app.log("Готово. Панель Джарвиса отвечает");
             return Ok(url);
         }
@@ -882,9 +904,24 @@ chmod 755 "$d/jarvis-supervisor.new"
 for name in wake.bin oww.bin wake_oww.bin; do test -e "$d/$name" || cp "$s/$name" "$d/$name"; done
 cp "$s/vqe_tap-{userland}.so" "$d/vqe_tap.so.new"
 if [ -f "$s/spotcmd" ]; then cp "$s/spotcmd" "$d/spotcmd"; chmod 755 "$d/spotcmd"; fi
-mount -o remount,rw /
-if ! cp "$s/S98jarvisd" /etc/init.d/S98jarvisd || ! chmod 755 /etc/init.d/S98jarvisd; then mount -o remount,ro /; exit 1; fi
-mount -o remount,ro /
+init=/etc/init.d/S98jarvisd
+manual=0
+if [ ! -f "$init" ]; then
+    if mount -o remount,rw /; then
+        tmp=/etc/init.d/.S98jarvisd.$$
+        if [ -d "$init" ] || ! (cp "$s/S98jarvisd" "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$init"); then
+            rm -f "$tmp" || true
+            manual=1
+        fi
+        mount -o remount,ro /
+    else
+        manual=1
+    fi
+fi
+if [ "$manual" = 1 ]; then
+    cp "$s/S98jarvisd" "$d/S98jarvisd"
+    chmod 755 "$d/S98jarvisd"
+fi
 if [ -x "$d/jarvisd.sh" ]; then "$d/jarvisd.sh" stop; sleep 2; fi
 for manifest in "$s"/module-*.json; do
     if [ -f "$manifest" ]; then
@@ -901,10 +938,13 @@ mv "$d/jarvis-supervisor.new" "$d/jarvis-supervisor"
 mv "$d/vqe_tap.so.new" "$d/vqe_tap.so"
 cp "$s/seed.json" "$d/seed.json"
 chmod 600 "$d/seed.json"
-rm -f "$s/seed.json" "$d/disabled"
+rm -f "$s/seed.json" "$d/disabled" "$d/update-rust.error"
 printf '%s' '{pending}' > "$d/update-rust.tmp"
 mv "$d/update-rust.tmp" "$d/update-rust.json"
 sync
-"$d/jarvisd.sh" boot"#
+"$d/jarvisd.sh" boot
+if [ "$manual" = 1 ]; then
+    printf '%s\n' '{AUTOSTART_MANUAL}'
+fi"#
     ))
 }

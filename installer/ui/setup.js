@@ -135,12 +135,17 @@ $("#uninstall").addEventListener("click", async () => {
 });
 
 const STAGES = [["Подключение", /Подключаюсь|Определена|Найден Джарвис/], ["Место", /Стираю|Удаляю|Свободно на колонке/], ["Файлы", /Копирую|%$/],
-  ["Автозапуск", /Выключаю|Добавляю автозапуск/], ["Перезагрузка", /Перезагружаю/], ["Готово", /Готово/]];
-function drawStages(lines, done, error) {
+  ["Автозапуск", /Выключаю|Добавляю автозапуск/], ["Запуск панели", /Проверяю запуск панели/], ["Готово", /Готово/]];
+function drawStages(lines, done, error, warning) {
   let at = 0, pct = null;
   lines.forEach((l) => { STAGES.forEach(([, re], i) => { if (re.test(l) && i >= at) at = i; }); const m = l.match(/(\d+)%$/); if (m) pct = +m[1]; });
   if (done && !error) at = STAGES.length;
-  $("#stages").innerHTML = STAGES.map(([name], i) => `<li class="${i < at ? "done" : i === at ? (error ? "bad" : "on") : ""}"><i aria-hidden="true"></i>${name}${i === at && i === 2 && pct != null && !done ? ` <small>${pct}%</small>` : ""}</li>`).join("");
+  $("#stages").innerHTML = STAGES.map(([name], i) => {
+    const manual = warning && name === "Автозапуск";
+    const state = manual ? "bad" : i < at ? "done" : i === at ? (error ? "bad" : "on") : "";
+    const detail = manual ? " <small>Вручную</small>" : i === at && i === 2 && pct != null && !done ? ` <small>${pct}%</small>` : "";
+    return `<li class="${state}"><i aria-hidden="true"></i>${name}${detail}</li>`;
+  }).join("");
   const p = $("#install-progress");
   if (done) p.value = 100; else p.value = Math.round(((at + (at === 2 && pct != null ? pct / 100 : 0.4)) / STAGES.length) * 100);
 }
@@ -161,14 +166,14 @@ function run(title) {
     try { d = await api("GET", "/api/job"); } catch { return; }
     $("#log").textContent = (d.lines || []).join("\n");
     $("#log").scrollTop = 1e9;
-    $("#job-status").textContent = d.error || ((d.lines || []).filter((l) => !/^\s*\d+%$/.test(l)).at(-1)) || "Подготавливаем установку…";
-    drawStages(d.lines || [], d.done, d.error);
+    $("#job-status").textContent = d.error || d.warning || ((d.lines || []).filter((l) => !/^\s*\d+%$/.test(l)).at(-1)) || "Подготавливаем установку…";
+    drawStages(d.lines || [], d.done, d.error, d.warning);
     if (d.done) {
       clearInterval(t);
-      $("#s4-title").textContent = d.error ? "Нужна ваша помощь." : "Всё готово.";
+      $("#s4-title").textContent = d.error ? "Нужна ваша помощь." : d.warning ? "Настройте автозапуск." : "Всё готово.";
       $("#install-progress").value = 100;
       $("#install-orb").classList.add(d.error ? "error" : "done");
-      $("#job-description").textContent = d.error ? "Установка остановлена. Причина показана ниже; подробности есть в журнале." : d.url ? "Джарвис установлен. Откройте панель, подключите любимый AI-сервис и выберите голос." : "Операция завершена. Можно вернуться к выбору колонки.";
+      $("#job-description").textContent = d.error ? "Установка остановлена. Причина показана ниже; подробности есть в журнале." : d.warning ? "Джарвис установлен и уже работает." : d.url ? "Джарвис установлен. Откройте панель, подключите любимый AI-сервис и выберите голос." : "Операция завершена. Можно вернуться к выбору колонки.";
       if (d.error) $("#job-details").open = true;
       if (d.url) { $("#open").href = d.url; $("#open").classList.remove("hidden"); }
       $("#again").classList.remove("hidden");

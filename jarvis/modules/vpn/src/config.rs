@@ -17,7 +17,24 @@ pub(crate) struct Config {
     pub reality: Option<Reality>,
     pub vision: bool,
     pub flow: String,
-    pub chrome: bool,
+    pub fingerprint: Fingerprint,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fingerprint {
+    Rustls,
+    Chrome133,
+    Firefox120,
+}
+
+impl Fingerprint {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rustls => "rustls",
+            Self::Chrome133 => "chrome133",
+            Self::Firefox120 => "firefox120",
+        }
+    }
 }
 pub(crate) struct Reality {
     pub public_key: [u8; 32],
@@ -126,12 +143,15 @@ impl Config {
         } else {
             None
         };
-        let chrome = matches!(get("fp"), "chrome" | "chrome133");
-        if tls && !matches!(get("fp"), "" | "rustls" | "chrome" | "chrome133") {
-            return Err("Этот TLS fingerprint ещё не перенесён в Rust VPN".into());
-        }
-        if chrome && reality.is_none() {
-            return Err("Chrome fingerprint пока поддерживается только с REALITY".into());
+        let fingerprint = match get("fp") {
+            "" | "rustls" => Fingerprint::Rustls,
+            "chrome" | "chrome133" => Fingerprint::Chrome133,
+            "firefox" | "firefox120" => Fingerprint::Firefox120,
+            _ if !tls => Fingerprint::Rustls,
+            _ => return Err("Этот TLS fingerprint ещё не перенесён в Rust VPN".into()),
+        };
+        if fingerprint != Fingerprint::Rustls && reality.is_none() {
+            return Err(format!("TLS fingerprint {} поддерживается только с REALITY", fingerprint.name()));
         }
         if !matches!(get("headerType"), "" | "none")
             || (!tls && (!get("pbk").is_empty() || !get("sid").is_empty()))
@@ -142,10 +162,10 @@ impl Config {
             return Err("Этот транспорт VLESS ещё не перенесён в Rust VPN".into());
         }
         // WebSocket needs HTTP/1.1; a raw byte tunnel must not negotiate an outer HTTP/2 session.
-        if chrome && !matches!(get("alpn"), "" | "h2,http/1.1") {
-            return Err("Chrome 133 REALITY использует ALPN h2,http/1.1".into());
+        if fingerprint != Fingerprint::Rustls && !matches!(get("alpn"), "" | "h2,http/1.1") {
+            return Err(format!("REALITY с TLS fingerprint {} использует ALPN h2,http/1.1", fingerprint.name()));
         }
-        if !chrome && !matches!(get("alpn"), "" | "http/1.1") {
+        if fingerprint == Fingerprint::Rustls && !matches!(get("alpn"), "" | "http/1.1") {
             return Err("Rust VPN пока поддерживает только ALPN http/1.1".into());
         }
         let server_name = [get("sni"), get("peer"), host.as_str()]
@@ -215,12 +235,12 @@ impl Config {
             reality,
             vision,
             flow: get("flow").to_string(),
-            chrome,
+            fingerprint,
         })
     }
 
     pub fn info(&self) -> Value {
         json!({"host":self.host,"port":self.port,"name":self.name,
-            "network":if self.websocket {"ws"} else {"tcp"},"security":if self.reality.is_some() {"reality"} else if self.tls {"tls"} else {"none"},"flow":self.flow,"fingerprint":if self.chrome {"chrome133"} else if self.tls {"rustls"} else {""}})
+            "network":if self.websocket {"ws"} else {"tcp"},"security":if self.reality.is_some() {"reality"} else if self.tls {"tls"} else {"none"},"flow":self.flow,"fingerprint":if self.tls {self.fingerprint.name()} else {""}})
     }
 }

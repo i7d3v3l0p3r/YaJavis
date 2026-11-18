@@ -152,11 +152,12 @@ Go-ядро не менялось. Старые native-плагины подде
 
 - VPN на Rust: VLESS TCP/WebSocket, TLS, REALITY, Vision и SOCKS5.
   Есть тесты с независимым Xray-сервером. REALITY поддерживает Chrome 133
-  (`fp=chrome`/`chrome133`) с X25519+ML-KEM, GREASE, перестановкой расширений и Brotli.
+  (`fp=chrome`/`chrome133`) с X25519+ML-KEM, GREASE, перестановкой расширений и Brotli,
+  а также Firefox 120 (`fp=firefox`/`firefox120`) с ключами X25519 и P-256.
   SOCKS5 UDP ASSOCIATE передаёт пакеты через VLESS UDP; UDP с Vision пока требует XUDP.
-  Нет Chrome для обычного TLS, остальных браузерных fingerprints,
+  Браузерные профили доступны для REALITY. Пока нет остальных fingerprints,
   ML-DSA, gRPC/XHTTP и остальных неподдерживаемых режимов из README модуля.
-  Профиль Chrome закреплён на версии 133. Параметры ссылки не удаляются молча.
+  Профили закреплены на версиях 133 и 120. Параметры ссылки не удаляются молча.
 - ChatGPT по подписке: вход устройства, обновление токена, Codex SSE,
   WebRTC, кодек Opus, запросы к бэкенду и постоянный ID чата.
   Локальный тест проверяет SDP, данные, звук и запрос к бэкенду.

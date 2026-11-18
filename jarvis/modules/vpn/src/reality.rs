@@ -1,6 +1,6 @@
 //! REALITY authentication using connection-scoped hooks in the pinned rustls fork.
 //! Wire format follows XTLS/REALITY; see THIRD-PARTY.md for implementation references.
-use crate::config::Config;
+use crate::config::{Config, Fingerprint};
 use reality_tls as tls;
 use ring::{aead, hkdf, hmac, signature};
 use std::{
@@ -26,7 +26,7 @@ struct Context {
     public: Option<[u8; 32]>,
 }
 struct Hooks {
-    chrome: bool,
+    fingerprint: Fingerprint,
     server: [u8; 32],
     short_id: [u8; 8],
     shared: Option<Zeroizing<[u8; 32]>>,
@@ -46,6 +46,7 @@ impl fmt::Debug for Verifier {
 struct Exchange {
     secret: StaticSecret,
     public: [u8; 32],
+    p256: Option<Box<dyn ActiveKeyExchange>>,
 }
 impl ActiveKeyExchange for Exchange {
     fn complete(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, Error> {
@@ -62,16 +63,27 @@ impl ActiveKeyExchange for Exchange {
     fn group(&self) -> NamedGroup {
         NamedGroup::X25519
     }
+    // rustls uses this hook to send and negotiate a second share alongside the primary one.
+    fn hybrid_component(&self) -> Option<(NamedGroup, &[u8])> {
+        self.p256.as_ref().map(|exchange| (exchange.group(), exchange.pub_key()))
+    }
+    fn complete_hybrid_component(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, Error> {
+        self.p256.ok_or_else(failure)?.complete(peer)
+    }
 }
 impl tls::reality::ClientHooks for Hooks {
     fn client_hello(&mut self, hello: &[u8]) -> Result<Vec<u8>, Error> {
-        if self.chrome { crate::chrome::hello(hello) } else { Ok(hello.to_vec()) }
+        match self.fingerprint {
+            Fingerprint::Chrome133 => crate::chrome::hello(hello),
+            Fingerprint::Firefox120 => crate::firefox::hello(hello),
+            Fingerprint::Rustls => Ok(hello.to_vec()),
+        }
     }
     fn start_key_exchange(
         &mut self,
         group: &'static dyn SupportedKxGroup,
     ) -> Result<Box<dyn ActiveKeyExchange>, Error> {
-        if self.chrome && group.name() == NamedGroup::X25519MLKEM768 {
+        if self.fingerprint == Fingerprint::Chrome133 && group.name() == NamedGroup::X25519MLKEM768 {
             let exchange = crate::chrome::Exchange::new()?;
             self.shared = Some(exchange.reality_secret(self.server)?);
             return Ok(Box::new(exchange));
@@ -88,7 +100,12 @@ impl tls::reality::ClientHooks for Hooks {
             return Err(failure());
         }
         self.shared = Some(Zeroizing::new(shared.to_bytes()));
-        Ok(Box::new(Exchange { secret, public }))
+        let p256 = if self.fingerprint == Fingerprint::Firefox120 {
+            Some(tls::crypto::ring::kx_group::SECP256R1.start()?)
+        } else {
+            None
+        };
+        Ok(Box::new(Exchange { secret, public, p256 }))
     }
     fn session_id(&mut self, hello: &[u8]) -> Result<[u8; 32], Error> {
         let shared = self.shared.take().ok_or_else(failure)?;
@@ -211,10 +228,12 @@ pub(crate) fn client(config: &Config) -> Result<tls::ClientConnection, String> {
         public: None,
     }));
     let mut provider = tls::crypto::ring::default_provider();
-    provider.kx_groups = if config.chrome {
-        vec![&crate::chrome::HYBRID, tls::crypto::ring::kx_group::X25519,
-            tls::crypto::ring::kx_group::SECP256R1, tls::crypto::ring::kx_group::SECP384R1]
-    } else { vec![tls::crypto::ring::kx_group::X25519] };
+    use tls::crypto::ring::kx_group::{SECP256R1, SECP384R1, X25519};
+    provider.kx_groups = match config.fingerprint {
+        Fingerprint::Chrome133 => vec![&crate::chrome::HYBRID, X25519, SECP256R1, SECP384R1],
+        Fingerprint::Firefox120 => vec![X25519, SECP256R1, SECP384R1],
+        Fingerprint::Rustls => vec![X25519],
+    };
     let mut settings = tls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&tls::version::TLS13])
         .map_err(|_| "Не настроить REALITY")?
@@ -223,9 +242,11 @@ pub(crate) fn client(config: &Config) -> Result<tls::ClientConnection, String> {
         .with_no_client_auth();
     settings.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     settings.resumption = tls::client::Resumption::disabled();
-    if !config.chrome { settings.cert_decompressors.clear(); }
+    if config.fingerprint != Fingerprint::Chrome133 {
+        settings.cert_decompressors.clear();
+    }
     let hooks = Hooks {
-        chrome: config.chrome,
+        fingerprint: config.fingerprint,
         server: reality.public_key,
         short_id: reality.short_id,
         shared: None,

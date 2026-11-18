@@ -2,6 +2,7 @@
 //! Only REALITY uses this profile; other modules keep their normal TLS implementation.
 #[cfg(test)]
 mod tests;
+use crate::client_hello::{Hello, u16s, vector};
 use ml_kem::{EncodedSizeUser, KemCore, MlKem768, kem::Decapsulate};
 use reality_tls::{
     Error, NamedGroup,
@@ -97,14 +98,6 @@ impl ActiveKeyExchange for Exchange {
     }
 }
 
-fn u16s(values: &[u16]) -> Vec<u8> {
-    values.iter().flat_map(|v| v.to_be_bytes()).collect()
-}
-fn vector(bytes: &[u8]) -> Vec<u8> {
-    let mut out = (bytes.len() as u16).to_be_bytes().to_vec();
-    out.extend(bytes);
-    out
-}
 fn grease(byte: u8) -> u16 {
     let b = (byte & 15) * 16 + 10;
     u16::from_be_bytes([b, b])
@@ -112,30 +105,8 @@ fn grease(byte: u8) -> u16 {
 
 /// Preserve the handshake's cryptographic inputs; shape only the browser's public offer.
 pub(crate) fn hello(original: &[u8]) -> Result<Vec<u8>, Error> {
-    if original.len() < 76 || original[0] != 1 || original[38] != 32 {
-        return Err(invalid());
-    }
-    let suite_len = u16::from_be_bytes([original[71], original[72]]) as usize;
-    let compression = 73 + suite_len;
-    let comp_len = *original.get(compression).ok_or_else(invalid)? as usize;
-    let start = compression + 1 + comp_len;
-    let raw = original.get(start + 2..).ok_or_else(invalid)?;
-    let mut source = std::collections::BTreeMap::new();
-    let mut offset = 0;
-    while offset < raw.len() {
-        let head = raw.get(offset..offset + 4).ok_or_else(invalid)?;
-        let kind = u16::from_be_bytes([head[0], head[1]]);
-        let len = u16::from_be_bytes([head[2], head[3]]) as usize;
-        let body = raw
-            .get(offset + 4..offset + 4 + len)
-            .ok_or_else(invalid)?
-            .to_vec();
-        if source.insert(kind, body).is_some() {
-            return Err(invalid());
-        }
-        offset += 4 + len;
-    }
-    let shares = source.get(&51).ok_or_else(invalid)?;
+    let mut hello = Hello::parse(original)?;
+    let shares = hello.extensions.get(&51).ok_or_else(invalid)?;
     // Real hybrid and classical shares must be present. Never advertise a fake PQ key.
     if shares.len() != 2 + 4 + 1216 + 4 + 32 {
         return Err(invalid());
@@ -162,7 +133,7 @@ pub(crate) fn hello(original: &[u8]) -> Result<Vec<u8>, Error> {
     getrandom::fill(&mut ech_payload).map_err(|_| Error::FailedToGetRandomBytes)?;
     ech.extend(ech_payload);
     let mut extensions: Vec<(u16, Vec<u8>)> = vec![
-        (0, source.remove(&0).ok_or_else(invalid)?), // SNI
+        (0, hello.extensions.remove(&0).ok_or_else(invalid)?), // SNI
         (23, vec![]),
         (65281, vec![0]),
         (10, vector(&u16s(&[group_grease, 4588, 29, 23, 24]))),
@@ -205,21 +176,10 @@ pub(crate) fn hello(original: &[u8]) -> Result<Vec<u8>, Error> {
     }
     extensions.insert(0, (first_grease, vec![]));
     extensions.push((last_grease, vec![0]));
-    let mut encoded = Vec::new();
-    for (kind, body) in extensions {
-        encoded.extend(kind.to_be_bytes());
-        encoded.extend(vector(&body));
-    }
     let mut suites = vec![cipher_grease];
     suites.extend([
         0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8, 0xc013, 0xc014,
         0x009c, 0x009d, 0x002f, 0x0035,
     ]);
-    let mut hello = original[..71].to_vec();
-    hello.extend(vector(&u16s(&suites)));
-    hello.extend([1, 0]);
-    hello.extend(vector(&encoded));
-    let length = (hello.len() - 4) as u32;
-    hello[1..4].copy_from_slice(&length.to_be_bytes()[1..]);
-    Ok(hello)
+    Ok(hello.encode(&suites, extensions))
 }

@@ -2,6 +2,8 @@
 //! TCP/WebSocket, TLS, and authenticated REALITY with optional XTLS Vision on TCP.
 mod config;
 mod chrome;
+mod client_hello;
+mod firefox;
 mod protocol;
 mod reality;
 #[cfg(test)]

@@ -103,7 +103,7 @@ fn chrome_profile_rejects_conflicting_alpn_and_other_fingerprints() {
     let base=format!("vless://00112233-4455-6677-8899-aabbccddeeff@127.0.0.1:443?security=reality&pbk={key}&sni=vpn.example.org");
     assert!(Config::parse(&format!("{base}&fp=chrome&alpn=h2%2Chttp%2F1.1")).is_ok());
     assert!(Config::parse(&format!("{base}&fp=chrome&alpn=http%2F1.1")).is_err());
-    assert!(Config::parse(&format!("{base}&fp=firefox")).is_err());
+    assert!(Config::parse(&format!("{base}&fp=safari")).is_err());
 }
 #[test]
 fn hybrid_and_classical_secrets_match_independent_peer_and_reject_low_order_keys() {
